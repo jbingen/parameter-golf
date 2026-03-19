@@ -1286,13 +1286,10 @@ def main() -> None:
                 qat_active = True
                 log0(f"qat_enabled:step={step} elapsed={elapsed_ms:.0f}ms")
 
-        # SWA activation (skip early steps where timing is unreliable)
-        if args.swa_enabled and not swa_active and max_wallclock_ms is not None and step > 10:
-            warmdown_start_ms = max_wallclock_ms - args.warmdown_iters * (elapsed_ms / max(step, 1))
-            swa_start_ms = warmdown_start_ms + (max_wallclock_ms - warmdown_start_ms) * args.swa_start_frac
-            if elapsed_ms >= swa_start_ms:
-                swa_active = True
-                log0(f"swa_enabled:step={step}")
+        # SWA activation: start collecting when we're in the warmdown phase (lr_mul < 1)
+        if args.swa_enabled and not swa_active and scale < 1.0:
+            swa_active = True
+            log0(f"swa_enabled:step={step} lr_scale={scale:.4f}")
 
         saved_weights = None
         if qat_active:
