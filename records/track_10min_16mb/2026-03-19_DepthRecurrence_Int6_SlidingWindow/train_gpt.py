@@ -179,9 +179,14 @@ class Muon(torch.optim.Optimizer):
 QUANT_MAX = {6: 31, 7: 63, 8: 127}
 
 def fake_quantize(w: Tensor, bits: int = 6) -> Tensor:
-    """Fake-quantize a 2D weight tensor with straight-through estimator."""
+    """Fake-quantize a 2D weight tensor with straight-through estimator.
+    Uses per-row amax scaling, matching quantize_float_tensor."""
     qmax = QUANT_MAX.get(bits, 127)
-    scale = w.detach().abs().amax(dim=1, keepdim=True).clamp_min(1e-5) / qmax
+    if w.ndim == 2:
+        scale = (w.detach().abs().amax(dim=1, keepdim=True) / float(qmax)).clamp_min(1.0 / float(qmax))
+        w_q = (w / scale).round().clamp(-qmax, qmax) * scale
+        return w + (w_q - w).detach()
+    scale = w.detach().abs().amax().clamp_min(1e-5) / qmax
     w_q = (w / scale).round().clamp(-qmax, qmax) * scale
     return w + (w_q - w).detach()
 
@@ -418,19 +423,14 @@ def quantize_float_tensor(t: Tensor, quant_bits: int = 6) -> tuple[Tensor, Tenso
     qmax = QUANT_MAX.get(quant_bits, 127)
     t32 = t.float()
     if t32.ndim == 2:
-        clip_abs = (
-            torch.quantile(t32.abs(), INT_CLIP_Q, dim=1)
-            if t32.numel()
-            else torch.empty((t32.shape[0],), dtype=torch.float32)
-        )
-        clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / float(qmax)).clamp_min(1.0 / float(qmax))
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
+        row_max = t32.abs().amax(dim=1) if t32.numel() else torch.empty((t32.shape[0],), dtype=torch.float32)
+        scale = (row_max / float(qmax)).clamp_min(1.0 / float(qmax))
+        q = torch.clamp(torch.round(t32 / scale[:, None]), -qmax, qmax).to(torch.int8).contiguous()
         return q, scale.to(dtype=INT_PER_ROW_SCALE_DTYPE).contiguous()
 
-    clip_abs = float(torch.quantile(t32.abs().flatten(), INT_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / float(qmax) if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -qmax, qmax).to(torch.int8).contiguous()
+    abs_max = float(t32.abs().amax().item()) if t32.numel() else 0.0
+    scale = torch.tensor(abs_max / float(qmax) if abs_max > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(t32 / scale), -qmax, qmax).to(torch.int8).contiguous()
     return q, scale
 
 
@@ -960,6 +960,9 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
+    # Enable QAT BEFORE compile so the fake_quantize path is traced into the graph
+    if args.qat_start_frac >= 0:
+        set_qat(base_model, True, args.quant_bits)
     compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
@@ -1016,7 +1019,7 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"muon_momentum:{args.muon_momentum} warmdown_iters:{args.warmdown_iters}")
-    log0(f"qat_start_frac:{args.qat_start_frac}")
+    log0(f"qat:always_on bits={args.quant_bits}")
     log0(f"seed:{args.seed}")
 
     # Data loader & warmup
@@ -1068,7 +1071,6 @@ def main() -> None:
     # Main training loop
     training_time_ms = 0.0
     stop_after_step: int | None = None
-    qat_enabled = False
     torch.cuda.synchronize()
     t0 = time.perf_counter()
 
@@ -1099,14 +1101,7 @@ def main() -> None:
                 )
             break
 
-        # Enable QAT after warmup fraction
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
-        if not qat_enabled and args.qat_start_frac > 0:
-            frac = elapsed_ms / max(max_wallclock_ms or (args.iterations * 50.0), 1.0)
-            if frac >= args.qat_start_frac:
-                set_qat(base_model, True, args.quant_bits)
-                qat_enabled = True
-                log0(f"qat_enabled:step={step} frac={frac:.3f} bits={args.quant_bits}")
 
         scale = lr_mul(step, elapsed_ms)
         zero_grad_all()
