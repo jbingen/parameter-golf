@@ -1,0 +1,27 @@
+{
+  "submission_name": "KitchenSink",
+  "track": "10min_16mb",
+  "description": "Stacks all proven techniques from top PRs + novel edges: int6+zstd, MLP 3x, NorMuon, MTP, in-place QAT, SWA, EMA, fp16 embed, batched sliding window, progressive context (1024->4096), LoRA TTT",
+  "date": "2026-03-19",
+  "config": {
+    "model_dim": 512,
+    "num_layers": 9,
+    "num_heads": 8,
+    "num_kv_heads": 4,
+    "mlp_mult": 3,
+    "vocab_size": 1024,
+    "train_seq_len": 1024,
+    "long_seq_len": 4096,
+    "tie_embeddings": true,
+    "quant_bits": 6,
+    "compression": "zstd-22",
+    "mtp_heads": 1,
+    "optimizer": "NorMuon",
+    "qat_fraction": 0.15,
+    "ema_decay": 0.999,
+    "swa": true,
+    "progressive_ctx": "1024->4096 at 70%",
+    "eval_stride": 64,
+    "eval_seq_len": 1024
+  }
+}
